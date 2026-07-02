@@ -1,0 +1,17 @@
+# ButtonConnect — Arduino IDE syntax highlighting
+# (fields are TAB-separated: name<TAB>KEYWORD1|KEYWORD2|LITERAL1)
+
+# Classes / datatypes (KEYWORD1)
+ButtonConnect	KEYWORD1
+ButtonConnectConfig	KEYWORD1
+
+# Methods / functions (KEYWORD2)
+begin	KEYWORD2
+loop	KEYWORD2
+connected	KEYWORD2
+emitEvent	KEYWORD2
+emitButtonPress	KEYWORD2
+publishTelemetry	KEYWORD2
+publishBattery	KEYWORD2
+onCommand	KEYWORD2
+onAck	KEYWORD2
