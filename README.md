@@ -1,11 +1,12 @@
 # ButtonConnect
 
 The **BYOD device SDK** for the [Button](https://buttonhq.io) cloud. Connect your own
-ESP32 / ESP8266 hardware to Button over TLS MQTT on the constrained `byod/{deviceId}/*`
-plane — publish button gestures and telemetry, receive commands, and get press
-acknowledgements back.
+ESP32 / ESP8266 hardware to Button over **MQTT-over-WSS** (secure WebSockets through the
+Cloudflare edge) on the constrained `byod/{deviceId}/*` plane — publish button gestures
+and telemetry, receive commands, and get press acknowledgements back.
 
-- **WiFi + TLS MQTT** with the Button root CA **bundled** — no certificate wrangling.
+- **WiFi + MQTT over secure WebSockets** with mandatory TLS server validation — the
+  broker is never exposed directly.
 - **Gestures**: single / double / triple click and click+long chords map straight
   to the triggers you configure in the dashboard.
 - **Commands**: built-in `reboot`; actuators handle their own methods via `onCommand`.
@@ -14,20 +15,24 @@ acknowledgements back.
 
 ## Install
 
+> Not yet in the PlatformIO / Arduino registries — install straight from GitHub.
+
 **PlatformIO** (`platformio.ini`):
 ```ini
 lib_deps =
-    ButtonConnect
-    knolleary/PubSubClient @ ^2.8
+    https://github.com/button-hq/ButtonConnect.git
+    links2004/WebSockets @ ^2.4.1
+    hideakitai/MQTTPubSubClient @ ^0.2.0
     bblanchon/ArduinoJson @ ^6.21.0
 platform = espressif32   ; or espressif8266
 board = esp32dev         ; XIAO C6 button → seeed_xiao_esp32c6
 framework = arduino
 ```
 
-**Arduino IDE**: Sketch → Include Library → Add .ZIP Library… (or drop the folder in
-`~/Documents/Arduino/libraries/`). Dependencies: install **PubSubClient** and
-**ArduinoJson** from the Library Manager.
+**Arduino IDE**: download the repo as a ZIP
+(`https://github.com/button-hq/ButtonConnect` → Code → Download ZIP), then Sketch →
+Include Library → Add .ZIP Library… Dependencies: install **WebSockets** (by Markus
+Sattler), **MQTTPubSubClient**, and **ArduinoJson** from the Library Manager.
 
 ## Quick start
 
@@ -65,9 +70,9 @@ See `examples/ButtonPress` for a full button with chord detection.
 
 | Method | Purpose |
 |---|---|
-| `begin(cfg)` | Configure WiFi + TLS + MQTT (non-blocking). |
+| `begin(cfg)` | Configure WiFi + WSS transport + MQTT (non-blocking). |
 | `loop()` | Pump the connection; service incoming commands/acks. Call every loop. |
-| `connected()` | WiFi + MQTT both up. |
+| `connected()` | WiFi + WSS + MQTT all up. |
 | `emitButtonPress(clicks, longs)` | Send a gesture chord → server triggers. |
 | `emitEvent(type, gesture)` | Send a raw event. |
 | `publishTelemetry(json)` | Publish a sensor reading. |
@@ -76,7 +81,38 @@ See `examples/ButtonPress` for a full button with chord detection.
 | `onAck(handler)` | Receive the server's press outcome (`on`/`off`/`ok`/`err`). |
 
 `ButtonConnectConfig`: `wifiSsid`, `wifiPassword`, `deviceId`, `deviceToken`, and
-optional `mqttHost` / `mqttPort` (default: the Button cloud broker).
+optional `mqttHost` / `mqttPort` / `mqttPath` (default: the Button cloud WSS endpoint
+`mq-server-01.buttonhq.io:443/`) and `rootCaPem`.
+
+**Certificates: nothing to configure.** The Button cloud sits behind a Cloudflare tunnel
+served with a public certificate, and the SDK bundles the two public roots behind it —
+*ISRG Root X1* (Let's Encrypt) and *GTS Root R4* (Google Trust Services). Both are shipped
+because Cloudflare re-issues that certificate unannounced and has moved between the two
+issuers; trusting only one would strand your devices the day it rotates. Set `rootCaPem`
+only when pointing at your own broker with its own CA.
+
+## ESP8266: the TLS heap flag
+
+**An ESP8266 build needs an extra flag or it will run out of memory during the TLS
+handshake.** Cloudflare does not negotiate MFLN, so BearSSL allocates a full 16 KB receive
+buffer — which does not fit alongside everything else in the ~40 KB heap. Enable the IRAM
+second heap:
+
+```ini
+[env:esp8266]
+platform  = espressif8266
+board     = nodemcuv2
+framework = arduino
+build_flags =
+  -DPIO_FRAMEWORK_ARDUINO_MMU_CACHE16_IRAM48_SECHEAP_SHARED
+```
+
+Symptoms without it: the WebSocket connects and the handshake then fails, or the device
+reboots on connect. ESP32 has ample heap and needs nothing.
+
+Trade-offs of the flag: slightly slower (16 KB cache plus IRAM byte-access emulation), and
+IRAM buffers must not be touched from an ISR or by DMA — worth knowing if you also drive
+interrupt-heavy peripherals.
 
 ## Topics
 

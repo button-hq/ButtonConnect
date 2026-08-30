@@ -4,29 +4,49 @@
 
 #if defined(ESP32)
   #include <WiFi.h>
-  #include <WiFiClientSecure.h>
 #else
   #include <ESP8266WiFi.h>
 #endif
-#include <PubSubClient.h>
+#include <WebSocketsClient.h>   // MUST precede MQTTPubSubClient.h to enable the WS transport
+#include <MQTTPubSubClient.h>
 
 // ── Button Connect SDK ───────────────────────────────────────────────────────
-// Connects an ESP device to the Button cloud (buttonhq.io) over TLS MQTT on the
-// constrained `byod/{deviceId}/*` plane. This is the connection/transport layer
+// Connects an ESP device to the Button cloud (buttonhq.io) over MQTT-over-WSS on
+// the constrained `byod/{deviceId}/*` plane. This is the connection/transport layer
 // extracted from the first-party firmware as the open-source baseline — no FOTA,
 // no deep sleep, no provisioning: credentials are supplied by the caller.
 //
+// Transport: secure WebSockets (wss://host:443/) → Cloudflare tunnel → mosquitto's
+// plaintext websockets listener. The broker is never exposed directly. TLS server
+// validation is MANDATORY (see rootCaPem below); auth is deviceId+token + the
+// server-side ACL, which decides what a given device may actually do (strategy §5.3).
+//
 // A *source* (button/sensor) publishes events/telemetry. An *actuator* (relay/IR)
-// additionally sets an onCommand() handler to receive commands. The server ACL
-// decides what a given device may actually do — see the integration strategy §5.3.
+// additionally sets an onCommand() handler to receive commands.
+
+// MQTT read/write buffer. MQTTPubSubClient<N> reserves two N-byte static buffers;
+// must hold one inbound command with inline ir.transmit timings. Override with
+// -DBUTTON_MQTT_BUF=… to trade RAM for larger payloads.
+#ifndef BUTTON_MQTT_BUF
+  #define BUTTON_MQTT_BUF 4096
+#endif
 
 struct ButtonConnectConfig {
     const char* wifiSsid;
     const char* wifiPassword;
-    const char* mqttHost   = "mq-server-01.iothub.ge";
-    uint16_t    mqttPort   = 8883;
+    // Cloudflare-fronted WSS endpoint (host:443, path "/"). The device connects with
+    // wss:// and the "mqtt" subprotocol.
+    const char* mqttHost   = "mq-server-01.buttonhq.io";
+    uint16_t    mqttPort   = 443;
+    const char* mqttPath   = "/";
     const char* deviceId   = "";
     const char* deviceToken = "";
+    // Trust anchor(s) as PEM. Leave null for the Button cloud: the SDK bundles the
+    // public roots behind Cloudflare's edge certificate (ISRG Root X1 and GTS Root
+    // R4), so the defaults connect as-is and survive Cloudflare rotating between the
+    // two. Set this only to point at a broker with its own CA — a self-hosted or
+    // local mosquitto. A concatenated multi-cert PEM is accepted.
+    const char* rootCaPem  = nullptr;
 };
 
 class ButtonConnect {
@@ -34,9 +54,9 @@ public:
     // method = e.g. "relay.set" | "ir.transmit"; argsJson = the command's raw "args" object.
     using CommandHandler = std::function<void(const String& method, const String& argsJson)>;
 
-    // Configure WiFi + TLS + MQTT. Does not block on the network; loop() drives connect.
+    // Configure WiFi + WSS transport + MQTT. Does not block on the network; loop() drives connect.
     void begin(const ButtonConnectConfig& cfg);
-    // Pump WiFi/MQTT: reconnect if dropped, service incoming messages. Call every loop().
+    // Pump WiFi/WS/MQTT: reconnect if dropped, service incoming messages. Call every loop().
     void loop();
     bool connected();
 
@@ -66,24 +86,19 @@ public:
 private:
     void connectWifi();
     bool connectMqtt();
-    void onMqttMessage(char* topic, uint8_t* payload, unsigned int len);
+    void ensureTransport();
+    void onCommandPayload(const String& payload);
     void ack(const String& id, const char* status, const char* error = nullptr);
 
     ButtonConnectConfig _cfg;
-#if defined(ESP32)
-    WiFiClientSecure _tls;
-#else
-    BearSSL::WiFiClientSecure _tls;
-#endif
-    PubSubClient _mqtt{_tls};
+    WebSocketsClient _ws;
+    MQTTPubSub::PubSubClient<BUTTON_MQTT_BUF> _mqtt;
 
     String _base;          // "byod/{deviceId}/"
     String _topicStatus, _topicEvent, _topicTelemetry, _topicBattery, _topicCommand, _topicCmdAck;
     CommandHandler _onCommand;
     AckHandler _onAck;
+    bool _transportBegun = false;
     unsigned long _lastReconnectAttempt = 0;
     unsigned long _seq = 0;
-
-    static ButtonConnect* _self;   // trampoline target for the C-style PubSubClient callback
-    static void mqttTrampoline(char* topic, uint8_t* payload, unsigned int len);
 };
