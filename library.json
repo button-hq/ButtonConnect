@@ -8,7 +8,7 @@
   "platforms": ["espressif32", "espressif8266"],
   "dependencies": {
     "links2004/WebSockets": "^2.4.1",
-    "hideakitai/MQTTPubSubClient": "^0.2.0",
+    "hideakitai/MQTTPubSubClient": "^0.3.2",
     "bblanchon/ArduinoJson": "^6.21.0"
   }
 }
