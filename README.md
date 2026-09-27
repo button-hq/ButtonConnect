@@ -22,7 +22,7 @@ and telemetry, receive commands, and get press acknowledgements back.
 lib_deps =
     https://github.com/button-hq/ButtonConnect.git
     links2004/WebSockets @ ^2.4.1
-    hideakitai/MQTTPubSubClient @ ^0.2.0
+    hideakitai/MQTTPubSubClient @ ^0.3.2
     bblanchon/ArduinoJson @ ^6.21.0
 platform = espressif32   ; or espressif8266
 board = esp32dev         ; XIAO C6 button → seeed_xiao_esp32c6
