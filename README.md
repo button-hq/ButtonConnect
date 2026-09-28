@@ -82,7 +82,7 @@ See `examples/ButtonPress` for a full button with chord detection.
 
 `ButtonConnectConfig`: `wifiSsid`, `wifiPassword`, `deviceId`, `deviceToken`, and
 optional `mqttHost` / `mqttPort` / `mqttPath` (default: the Button cloud WSS endpoint
-`mq-server-01.buttonhq.io:443/`) and `rootCaPem`.
+`mq-server-01.buttonhq.io:443/`) and `rootCaPem`, and `ntpServer` (ESP8266 only; see below).
 
 **Certificates: nothing to configure.** The Button cloud sits behind a Cloudflare tunnel
 served with a public certificate, and the SDK bundles the two public roots behind it —
@@ -113,6 +113,21 @@ reboots on connect. ESP32 has ample heap and needs nothing.
 Trade-offs of the flag: slightly slower (16 KB cache plus IRAM byte-access emulation), and
 IRAM buffers must not be touched from an ISR or by DMA — worth knowing if you also drive
 interrupt-heavy peripherals.
+
+## ESP8266: the clock must be set (handled by the SDK)
+
+The ESP8266 has no battery-backed clock: after boot it reads 1970 until something sets it,
+and BearSSL checks the server certificate's validity dates against that clock. With the
+clock unset **every** TLS handshake fails ("Certificate is expired or not yet valid"), and
+from the outside it just looks like a WebSocket that never connects. Whether the clock got
+set used to depend on the WiFi router (some hand out an NTP server via DHCP, most home
+routers don't), so the same firmware could work on one network and never on another.
+
+Since 0.3.1 the SDK sets the clock itself before the first handshake, using NTP
+(`pool.ntp.org`, with `time.google.com` and `time.cloudflare.com` as fallbacks), and logs
+`[Time] clock set`. Nothing to configure. If your network blocks outbound NTP (UDP/123),
+you will see `[Time] NTP sync failed` instead of a silent timeout — point
+`cfg.ntpServer` at a reachable NTP server (e.g. your router). ESP32 is not affected.
 
 ## Topics
 

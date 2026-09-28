@@ -47,6 +47,10 @@ struct ButtonConnectConfig {
     // two. Set this only to point at a broker with its own CA — a self-hosted or
     // local mosquitto. A concatenated multi-cert PEM is accepted.
     const char* rootCaPem  = nullptr;
+    // NTP server used to set the clock before the TLS handshake (ESP8266 only — see
+    // ensureClock()). Two public fallbacks are always tried as well. Point this at a
+    // local NTP server on networks that block outbound UDP/123 to the internet.
+    const char* ntpServer  = "pool.ntp.org";
 };
 
 class ButtonConnect {
@@ -87,6 +91,7 @@ private:
     void connectWifi();
     bool connectMqtt();
     void ensureTransport();
+    bool ensureClock();
     void onCommandPayload(const String& payload);
     void ack(const String& id, const char* status, const char* error = nullptr);
 
@@ -99,6 +104,7 @@ private:
     CommandHandler _onCommand;
     AckHandler _onAck;
     bool _transportBegun = false;
+    bool _ntpStarted = false;
     unsigned long _lastReconnectAttempt = 0;
     unsigned long _seq = 0;
 };
