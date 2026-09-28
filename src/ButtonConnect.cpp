@@ -106,8 +106,8 @@ void ButtonConnect::begin(const ButtonConnectConfig& cfg) {
 // exactly one step (never more) per call, using millis() deltas *across calls* instead
 // of a local while/delay. The one wait that cannot be removed without replacing the
 // transport library is the initial TCP+TLS handshake inside WebSocketsClient::loop()
-// (~1-3 s typically, up to ~5 s worst case, see links2004/WebSockets — the handshake
-// itself, not our polling of it, blocks); see WS_WAIT below and the README.
+// (~5 s on ESP8266; 1-5 s on ESP32 and up to ~15 s when it fails, measured — the
+// handshake itself, not our polling of it, blocks); see WS_WAIT below and the README.
 //
 //   WIFI_START   → WiFi.begin() once, immediately → WIFI_WAIT
 //   WIFI_WAIT    → poll WiFi.status(); on connect → CLOCK_WAIT (8266) / WS_START (32);
@@ -270,7 +270,7 @@ void ButtonConnect::stepWsWait(unsigned long now) {
     // The WebSocket handshake is async at the protocol level, but WebSocketsClient::loop()
     // performs the initial TCP+TLS connect() SYNCHRONOUSLY the first time (and again every
     // setReconnectInterval() while still failed) — this is the one blocking call left in
-    // the SDK (~1-3 s typically, up to WEBSOCKETS_TCP_TIMEOUT ~5 s on ESP32; see
+    // the SDK (~5 s on ESP8266; up to ~15 s on ESP32 when it fails, measured; see
     // links2004/WebSockets WebSocketsClient::loop()/connect paths). Everything after that
     // (the HTTP Upgrade handshake) is pumped incrementally by later loop() calls
     // (handleClientData()), which is why calling this once per SDK loop() call is correct

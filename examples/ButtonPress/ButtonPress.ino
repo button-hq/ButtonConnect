@@ -6,10 +6,10 @@
 // 2. Fill the credentials below (+ your WiFi).
 // 3. Flash, open Serial @115200, and press: single / double / triple / long / click+long.
 //
-// btn.loop() still has one unavoidable blocking call inside it — the initial TCP+TLS
-// handshake performed by the WebSockets library (typically 1-3 s, up to ~5 s worst
-// case). A digitalRead() done only once per loop() iteration would miss presses that
-// land during that window. So the button is latched in an interrupt instead: an ISR records every edge's
+// NOTE: while connecting/reconnecting, btn.loop() freezes for each TCP+TLS handshake
+// performed by the WebSockets library (~5 s on ESP8266; 1-5 s on ESP32, up to ~15 s when
+// a handshake fails; see README "How loop() behaves"). A digitalRead() done only once per
+// loop() iteration would miss presses that land during that window. So the button is latched in an interrupt instead: an ISR records every edge's
 // timestamp into a small ring buffer the instant it happens, and loop() drains that
 // buffer through the SAME debounce/classify/chord state machine (ButtonGesture.h,
 // shared with the SDK's own host-side unit tests) whether or not it was delayed getting

@@ -63,8 +63,9 @@ public:
     void begin(const ButtonConnectConfig& cfg);
     // Pump WiFi/WS/MQTT: reconnect if dropped, service incoming messages. Call every loop().
     // Advances one connection-state-machine step per call (see State below) instead of
-    // blocking — see README "How loop() behaves" for the one call that can still block
-    // briefly (the TCP+TLS handshake inside the WS library, ~1-3 s, up to ~5 s).
+    // blocking — EXCEPT the TCP+TLS handshake inside the WS library, which freezes loop()
+    // on every connection attempt (~5 s on ESP8266; up to ~15 s on ESP32 when it fails).
+    // See README "How loop() behaves".
     void loop();
     bool connected();
 
