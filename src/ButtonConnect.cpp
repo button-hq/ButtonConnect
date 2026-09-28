@@ -92,28 +92,77 @@ void ButtonConnect::begin(const ButtonConnectConfig& cfg) {
     // The WSS transport (WebSocketsClient + MQTTPubSubClient) is initialized lazily in
     // ensureTransport() on the first connect so a failed handshake can tear it down and
     // free the TLS buffer before the next retry.
+    _state = State::WIFI_START;
+    _backoff.reset();
 }
 
-void ButtonConnect::connectWifi() {
-    if (WiFi.status() == WL_CONNECTED) return;
-    Serial.printf("[WiFi] connecting to %s ...\n", _cfg.wifiSsid);
-    WiFi.begin(_cfg.wifiSsid, _cfg.wifiPassword);
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-        delay(250);
-        Serial.print('.');
+// ── Non-blocking connection state machine ──────────────────────────────────
+//
+// loop() used to block the caller for seconds at a time (WiFi.begin + 20 s poll loop,
+// a 15 s NTP wait, a 15 s WS-handshake wait, all with delay() inside) — a sketch that
+// reads its button after btn.loop() lost every press that happened during an outage.
+//
+// Every one of those waits is now a *state*, and loop() advances the state machine by
+// exactly one step (never more) per call, using millis() deltas *across calls* instead
+// of a local while/delay. The one wait that cannot be removed without replacing the
+// transport library is the initial TCP+TLS handshake inside WebSocketsClient::loop()
+// (~1-3 s typically, up to ~5 s worst case, see links2004/WebSockets — the handshake
+// itself, not our polling of it, blocks); see WS_WAIT below and the README.
+//
+//   WIFI_START   → WiFi.begin() once, immediately → WIFI_WAIT
+//   WIFI_WAIT    → poll WiFi.status(); on connect → CLOCK_WAIT (8266) / WS_START (32);
+//                  after 20 s → BACKOFF → WIFI_START
+//   CLOCK_WAIT   → (ESP8266 only) poll time(nullptr) after one configTime(); on set →
+//                  WS_START; after 15 s → BACKOFF → CLOCK_WAIT
+//   WS_START     → ensureTransport() (begin, idempotent) → WS_WAIT
+//   WS_WAIT      → pump _ws.loop() once; on isConnected() → MQTT_CONNECT; after 15 s →
+//                  tear down (frees the BearSSL buffer) → BACKOFF → WS_START
+//   MQTT_CONNECT → (WS already up) bounded MQTT CONNECT; on success → CONNECTED
+//                  (backoff resets to 3 s); on reject → BACKOFF → MQTT_CONNECT
+//   CONNECTED    → pump _ws.loop() + _mqtt.update(); on WS drop → tear down → BACKOFF →
+//                  WS_START; on MQTT-only drop → BACKOFF → MQTT_CONNECT
+//   BACKOFF      → wait out 3 s..60 s (doubling, logged once) → jump to the stored
+//                  target state
+//
+// A WiFi drop detected in ANY state above WIFI_WAIT (except while already backing off
+// to retry WiFi itself) forces an immediate restart at WIFI_START — there is no point
+// waiting out an MQTT retry timer against a dead link.
+void ButtonConnect::stepWifiStart() {
+    if (WiFi.status() == WL_CONNECTED) {
+        _clockWaitStartMs = millis();
+        _state = needsClockWait() ? State::CLOCK_WAIT : State::WS_START;
+        return;
     }
-    Serial.println();
-    if (WiFi.status() == WL_CONNECTED)
+    Serial.printf("[WiFi] connecting to %s ...\n", _cfg.wifiSsid);
+    WiFi.begin(_cfg.wifiSsid, _cfg.wifiPassword);   // called ONCE per attempt, not per loop()
+    _wifiStartMs = millis();
+    _state = State::WIFI_WAIT;
+}
+
+void ButtonConnect::stepWifiWait(unsigned long now) {
+    if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("[WiFi] connected, ip=%s\n", WiFi.localIP().toString().c_str());
-    else
+        _clockWaitStartMs = now;
+        _state = needsClockWait() ? State::CLOCK_WAIT : State::WS_START;
+        return;
+    }
+    if (now - _wifiStartMs >= 20000) {
         Serial.println("[WiFi] connect timed out — will retry");
+        enterBackoff(State::WIFI_START, "[WiFi]");
+    }
+    // else: nothing to do this call — WiFi.begin() is already in flight.
 }
 
 // Initialize the secure-WebSocket transport + MQTT-over-WS layer (idempotent per session).
 void ButtonConnect::ensureTransport() {
     if (_transportBegun) return;
 
+    // Governs how often WebSocketsClient::loop() itself retries the blocking TCP+TLS
+    // connect while we're in WS_WAIT (see stepWsWait below) — NOT how often *we* retry
+    // overall; the SDK's own backoff (3 s..60 s, doubling) covers that and is enforced
+    // by simply not calling _ws.loop() at all while in BACKOFF (see loop()'s switch).
+    // Left at the library's already-reasonable 3 s so a WS_WAIT window (15 s) gets a
+    // handful of TCP attempts rather than just one.
     _ws.setReconnectInterval(3000);
     // WS-level ping keeps the connection warm under Cloudflare's ~100s idle cutoff and
     // detects half-open links (30s ping, 6s pong timeout, drop after 2 misses).
@@ -141,6 +190,23 @@ void ButtonConnect::ensureTransport() {
     _transportBegun = true;
 }
 
+void ButtonConnect::teardownTransport() {
+    // Tear the WS/TLS down so its BearSSL buffer is freed — otherwise each failed
+    // attempt leaks it and the next retry can OOM. ensureTransport() re-inits it fresh
+    // on the next WS_START; no new heap churn happens anywhere else (CONNECTED never
+    // calls this).
+    _ws.disconnect();
+    _transportBegun = false;
+}
+
+bool ButtonConnect::needsClockWait() {
+#if defined(ESP8266)
+    return true;
+#else
+    return false;   // arduino-esp32's mbedTLS does not fail on an unset clock.
+#endif
+}
+
 // ESP8266 / BearSSL checks the server certificate's validity dates against the system
 // clock, and the ESP8266 has no RTC: after boot the clock reads the Unix epoch (1970) until
 // something sets it. With the clock at 1970 every handshake fails with "Certificate is
@@ -149,62 +215,110 @@ void ButtonConnect::ensureTransport() {
 // via DHCP, most home routers do not), so the same firmware worked on one WiFi and never
 // connected on another. Set it explicitly before the first handshake.
 // (ESP32/mbedTLS in arduino-esp32 does not fail on an unset clock, so this is 8266-only.)
+//
+// Non-blocking: one check + at most one configTime() kick per call. The 15 s deadline is
+// enforced by the caller (stepClockWait), measured across calls via millis(), not here.
 bool ButtonConnect::ensureClock() {
 #if defined(ESP8266)
-    if (time(nullptr) >= (time_t)BUTTON_MIN_VALID_EPOCH) return true;
+    if (time(nullptr) >= (time_t)BUTTON_MIN_VALID_EPOCH) {
+        if (_ntpStarted) {   // we were waiting on it — log the transition exactly once
+            Serial.printf("[Time] clock set, epoch=%lu\n", (unsigned long)time(nullptr));
+            _ntpStarted = false;
+        }
+        return true;
+    }
     if (!_ntpStarted) {
         const char* primary = (_cfg.ntpServer && *_cfg.ntpServer) ? _cfg.ntpServer : "pool.ntp.org";
         configTime(0, 0, primary, "time.google.com", "time.cloudflare.com");
         _ntpStarted = true;
         Serial.printf("[Time] clock not set; syncing via NTP (%s) ...\n", primary);
     }
-    unsigned long t0 = millis();
-    while (time(nullptr) < (time_t)BUTTON_MIN_VALID_EPOCH && millis() - t0 < BUTTON_NTP_TIMEOUT_MS) {
-        delay(100);
-        yield();
-    }
-    if (time(nullptr) < (time_t)BUTTON_MIN_VALID_EPOCH) {
-        Serial.println("[Time] NTP sync failed — TLS certificate check cannot pass; will retry "
-                       "(is outbound UDP/123 blocked? set cfg.ntpServer to a reachable server)");
-        return false;
-    }
-    Serial.printf("[Time] clock set, epoch=%lu\n", (unsigned long)time(nullptr));
-#endif
+    return false;
+#else
     return true;
+#endif
 }
 
-bool ButtonConnect::connectMqtt() {
-    // Without a valid clock the 8266 TLS handshake cannot succeed; don't burn a 15 s
-    // WebSocket attempt on it.
-    if (!ensureClock()) return false;
+void ButtonConnect::stepClockWait(unsigned long now) {
+#if defined(ESP8266)
+    if (!_ntpStarted) _clockWaitStartMs = now;   // (re)starting an attempt — reset the deadline
+    if (ensureClock()) {
+        _state = State::WS_START;
+        return;
+    }
+    if (now - _clockWaitStartMs >= BUTTON_NTP_TIMEOUT_MS) {
+        Serial.println("[Time] NTP sync failed — TLS certificate check cannot pass; will retry "
+                       "(is outbound UDP/123 blocked? set cfg.ntpServer to a reachable server)");
+        _ntpStarted = false;   // force a fresh configTime() on the next attempt
+        enterBackoff(State::CLOCK_WAIT, "[Time]");
+    }
+    // else: NTP reply hasn't arrived yet — nothing to do this call.
+#else
+    _state = State::WS_START;   // unreachable (needsClockWait() is false), kept defensive
+#endif
+}
+
+void ButtonConnect::stepWsStart() {
     ensureTransport();
     Serial.printf("[MQTT] WSS connect to wss://%s:%u%s ...\n",
                   _cfg.mqttHost, _cfg.mqttPort, _cfg.mqttPath);
+    _wsStartMs = millis();
+    _state = State::WS_WAIT;
+}
 
-    // The WebSocket handshake is async — pump it until the transport is up before the
-    // MQTT CONNECT can ride it.
-    unsigned long t0 = millis();
-    while (!_ws.isConnected() && (millis() - t0) < BUTTON_WS_CONNECT_TIMEOUT_MS) {
-        _ws.loop();
-        delay(10);
-        yield();
+void ButtonConnect::stepWsWait(unsigned long now) {
+    // The WebSocket handshake is async at the protocol level, but WebSocketsClient::loop()
+    // performs the initial TCP+TLS connect() SYNCHRONOUSLY the first time (and again every
+    // setReconnectInterval() while still failed) — this is the one blocking call left in
+    // the SDK (~1-3 s typically, up to WEBSOCKETS_TCP_TIMEOUT ~5 s on ESP32; see
+    // links2004/WebSockets WebSocketsClient::loop()/connect paths). Everything after that
+    // (the HTTP Upgrade handshake) is pumped incrementally by later loop() calls
+    // (handleClientData()), which is why calling this once per SDK loop() call is correct
+    // and sufficient — no local while/delay needed.
+    _ws.loop();
+    if (_ws.isConnected()) {
+        _state = State::MQTT_CONNECT;
+        return;
     }
-    if (!_ws.isConnected()) {
+    if (now - _wsStartMs >= BUTTON_WS_CONNECT_TIMEOUT_MS) {
         Serial.println("[MQTT] WSS transport not up (handshake/timeout)");
-        // Tear the WS/TLS down so its BearSSL buffer is freed — otherwise each failed
-        // attempt leaks it and the next retry can OOM. Re-init on the next connect.
-        _ws.disconnect();
-        _transportBegun = false;
-        return false;
+        teardownTransport();
+        enterBackoff(State::WS_START, "[MQTT]");
+    }
+}
+
+void ButtonConnect::stepMqttConnect() {
+    // Reached only once WS_WAIT has already observed _ws.isConnected() == true (or
+    // CONNECTED demoted us here after an MQTT-only drop with the WS still up). Guard
+    // against a drop in between anyway.
+    if (!_ws.isConnected()) {
+        // The WS dropped while we were backing off (or between states). No attempt failed
+        // here, so don't consume another backoff step — rebuild the transport now.
+        teardownTransport();
+        _state = State::WS_START;
+        return;
     }
 
-    // LWT: mark offline if the connection drops.
+    // MQTTPubSubClient::connect() has its own "wait for WS" busy-loop
+    // (`while(!client->isConnected()) { client->loop(); delay(10); }`), but since we only
+    // ever call connect() with the WS already up, that loop's condition is false on its
+    // very first check and it never actually spins. The real remaining wait is the
+    // CONNACK round-trip inside lwmqtt_connect(), which we bound with setTimeout() —
+    // normally tens of ms over an already-open WS, so 2 s is a generous ceiling, not a
+    // typical wait.
+    _mqtt.setTimeout(2000);
     _mqtt.setWill(_topicStatus.c_str(), "{\"online\":false}", false, 1);
     if (!_mqtt.connect(_cfg.deviceId, _cfg.deviceId, _cfg.deviceToken)) {
         Serial.printf("[MQTT] CONNECT rejected, rc=%d\n", (int)_mqtt.getReturnCode());
-        return false;
+        // A failed connect() makes MQTTPubSubClient call close(), which disconnects the
+        // WebSocket too — so the retry has to start from a fresh transport, not just a
+        // new CONNECT. Tearing down here also frees the BearSSL buffer while we back off.
+        teardownTransport();
+        enterBackoff(State::WS_START, "[MQTT]");
+        return;
     }
     Serial.println("[MQTT] connected");
+    _backoff.reset();   // a real outage's retry ladder shouldn't linger after recovery
 
     // Always subscribe to the command topic — even a source device receives management
     // commands (e.g. reboot). Actuation methods are dispatched to onCommand (if set).
@@ -217,29 +331,78 @@ bool ButtonConnect::connectMqtt() {
     String status = String("{\"online\":true,\"ip\":\"") + WiFi.localIP().toString() +
                     "\",\"ssid\":\"" + WiFi.SSID() + "\",\"rssi\":" + String(WiFi.RSSI()) + "}";
     _mqtt.publish(_topicStatus.c_str(), status.c_str());
-    return true;
+    _state = State::CONNECTED;
 }
 
-void ButtonConnect::loop() {
-    connectWifi();
-    if (WiFi.status() != WL_CONNECTED) return;
-
-    if (!connected()) {
-        unsigned long now = millis();
-        if (now - _lastReconnectAttempt >= 3000) {
-            _lastReconnectAttempt = now;
-            connectMqtt();
-        }
-        // Keep pumping the WS even while MQTT is down so the handshake completes.
-        _ws.loop();
+void ButtonConnect::stepConnected() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WiFi] connection lost — reconnecting");
+        teardownTransport();
+        _state = State::WIFI_START;
         return;
     }
     _ws.loop();       // pump the WebSocket (rx + heartbeat)
+    if (!_ws.isConnected()) {
+        Serial.println("[MQTT] WSS connection lost — reconnecting");
+        teardownTransport();
+        enterBackoff(State::WS_START, "[MQTT]");
+        return;
+    }
     _mqtt.update();   // process MQTT + fire subscription callbacks
+    if (!_mqtt.isConnected()) {
+        Serial.println("[MQTT] connection lost — reconnecting");
+        // MQTT-level loss (keepalive/protocol error) with the WS still up: retry the
+        // CONNECT; stepMqttConnect falls back to WS_START if the WS is gone by then.
+        enterBackoff(State::MQTT_CONNECT, "[MQTT]");
+    }
+}
+
+void ButtonConnect::enterBackoff(State target, const char* logTag) {
+    unsigned long delayMs = _backoff.onFailure();
+    Serial.printf("%s retry in %lu s\n", logTag, delayMs / 1000UL);
+    _backoffTarget  = target;
+    _backoffUntilMs = millis() + delayMs;
+    _state = State::BACKOFF;
+}
+
+void ButtonConnect::stepBackoff(unsigned long now) {
+    // Don't wait out a WS/MQTT retry timer against a link that's already dead — go
+    // straight back to WIFI_START. (If we're already backing off to retry WiFi itself,
+    // fall through to the normal timer below.)
+    if (WiFi.status() != WL_CONNECTED && _backoffTarget != State::WIFI_START) {
+        teardownTransport();
+        _state = State::WIFI_START;
+        return;
+    }
+    if ((long)(now - _backoffUntilMs) >= 0) {
+        _state = _backoffTarget;
+    }
+}
+
+unsigned long ButtonConnect::nextRetryInMs() const {
+    if (_state != State::BACKOFF) return 0;
+    unsigned long now = millis();
+    long remaining = (long)(_backoffUntilMs - now);
+    return remaining > 0 ? (unsigned long)remaining : 0;
+}
+
+void ButtonConnect::loop() {
+    unsigned long now = millis();
+    switch (_state) {
+        case State::WIFI_START:   stepWifiStart();    break;
+        case State::WIFI_WAIT:    stepWifiWait(now);  break;
+        case State::CLOCK_WAIT:   stepClockWait(now); break;
+        case State::WS_START:     stepWsStart();      break;
+        case State::WS_WAIT:      stepWsWait(now);    break;
+        case State::MQTT_CONNECT: stepMqttConnect();  break;
+        case State::CONNECTED:    stepConnected();    break;
+        case State::BACKOFF:      stepBackoff(now);   break;
+    }
 }
 
 bool ButtonConnect::connected() {
-    return WiFi.status() == WL_CONNECTED && _ws.isConnected() && _mqtt.isConnected();
+    return _state == State::CONNECTED &&
+           WiFi.status() == WL_CONNECTED && _ws.isConnected() && _mqtt.isConnected();
 }
 
 bool ButtonConnect::emitEvent(const char* type, const char* gesture) {

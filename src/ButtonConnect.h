@@ -9,6 +9,7 @@
 #endif
 #include <WebSocketsClient.h>   // MUST precede MQTTPubSubClient.h to enable the WS transport
 #include <MQTTPubSubClient.h>
+#include "internal/backoff.h"
 
 // ── Button Connect SDK ───────────────────────────────────────────────────────
 // Connects an ESP device to the Button cloud (buttonhq.io) over MQTT-over-WSS on
@@ -61,8 +62,27 @@ public:
     // Configure WiFi + WSS transport + MQTT. Does not block on the network; loop() drives connect.
     void begin(const ButtonConnectConfig& cfg);
     // Pump WiFi/WS/MQTT: reconnect if dropped, service incoming messages. Call every loop().
+    // Advances one connection-state-machine step per call (see State below) instead of
+    // blocking — see README "How loop() behaves" for the one call that can still block
+    // briefly (the TCP+TLS handshake inside the WS library, ~1-3 s, up to ~5 s).
     void loop();
     bool connected();
+
+    // Connection state machine driven one step per loop() call. Exposed for
+    // diagnostics/tests; sketches normally only need connected().
+    enum class State {
+        WIFI_START,     // about to call WiFi.begin()
+        WIFI_WAIT,      // WiFi.begin() issued, polling WiFi.status()
+        CLOCK_WAIT,     // ESP8266 only: waiting for NTP to set the clock
+        WS_START,       // about to (re-)initialize the WS/TLS transport
+        WS_WAIT,        // pumping _ws.loop() until the WSS handshake completes
+        MQTT_CONNECT,   // WS is up; issuing the bounded MQTT CONNECT
+        CONNECTED,      // WiFi + WS + MQTT all up; servicing traffic
+        BACKOFF,        // waiting out a failure's backoff delay before retrying
+    };
+    State state() const { return _state; }
+    // Milliseconds until the next retry is attempted while in BACKOFF, else 0.
+    unsigned long nextRetryInMs() const;
 
     // ── Source → server (publish) ──
     // Fire a discrete event that drives the owner's server-side triggers.
@@ -88,10 +108,24 @@ public:
     void onAck(AckHandler handler) { _onAck = handler; }
 
 private:
-    void connectWifi();
-    bool connectMqtt();
+    // Each step* function advances exactly ONE state and returns to loop() — none of
+    // them may block or spin; any wait is expressed as "check elapsed millis(), bail
+    // out this call, get called again next loop()". See README "How loop() behaves".
+    void stepWifiStart();
+    void stepWifiWait(unsigned long now);
+    void stepClockWait(unsigned long now);
+    void stepWsStart();
+    void stepWsWait(unsigned long now);
+    void stepMqttConnect();
+    void stepConnected();
+    void stepBackoff(unsigned long now);
+    void enterBackoff(State target, const char* logTag);
+
     void ensureTransport();
-    bool ensureClock();
+    bool ensureClock();   // one non-blocking check/kick of the ESP8266 NTP sync
+    void teardownTransport();
+    static bool needsClockWait();   // true on ESP8266 only
+
     void onCommandPayload(const String& payload);
     void ack(const String& id, const char* status, const char* error = nullptr);
 
@@ -105,6 +139,13 @@ private:
     AckHandler _onAck;
     bool _transportBegun = false;
     bool _ntpStarted = false;
-    unsigned long _lastReconnectAttempt = 0;
     unsigned long _seq = 0;
+
+    State _state = State::WIFI_START;
+    buttonconnect::Backoff _backoff;
+    State _backoffTarget = State::WIFI_START;
+    unsigned long _backoffUntilMs   = 0;
+    unsigned long _wifiStartMs      = 0;
+    unsigned long _clockWaitStartMs = 0;
+    unsigned long _wsStartMs        = 0;
 };
