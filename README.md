@@ -81,7 +81,7 @@ useful for a status LED or diagnostics; neither is required for normal use.
 | WS_WAIT | MQTT_CONNECT | `_ws.isConnected()` |
 | WS_WAIT | BACKOFF → WS_START | 15 s without a WS handshake (transport torn down) |
 | MQTT_CONNECT | CONNECTED | broker CONNACK accepted (backoff resets) |
-| MQTT_CONNECT | BACKOFF → MQTT_CONNECT | broker rejected CONNECT (`rc=`) |
+| MQTT_CONNECT | BACKOFF → WS_START | CONNECT failed: `[MQTT] CONNECT rejected (<reason>, err=N)` |
 | CONNECTED | WIFI_START | WiFi link lost |
 | CONNECTED | BACKOFF → WS_START | WS dropped (transport torn down) |
 | CONNECTED | BACKOFF → MQTT_CONNECT | MQTT-only drop, WS still up |

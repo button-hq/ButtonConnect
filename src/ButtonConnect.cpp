@@ -96,6 +96,19 @@ void ButtonConnect::begin(const ButtonConnectConfig& cfg) {
     _backoff.reset();
 }
 
+// Human-readable reason for a failed MQTT CONNECT, from lwmqtt_err_t (lwmqtt.h).
+static const char* connectErrorText(int err) {
+    switch (err) {
+        case -10: return "refused by broker: bad credentials or unknown device";  // LWMQTT_CONNECTION_DENIED
+        case -4:  return "no CONNACK before timeout";                              // LWMQTT_NETWORK_TIMEOUT
+        case -9:  return "unexpected packet instead of CONNACK";                   // LWMQTT_MISSING_OR_WRONG_PACKET
+        case -5:  return "read failed (connection closed)";                        // LWMQTT_NETWORK_FAILED_READ
+        case -6:  return "write failed (connection closed)";                       // LWMQTT_NETWORK_FAILED_WRITE
+        case -3:  return "transport not connected";                                // LWMQTT_NETWORK_FAILED_CONNECT
+        default:  return "error";
+    }
+}
+
 // ── Non-blocking connection state machine ──────────────────────────────────
 //
 // loop() used to block the caller for seconds at a time (WiFi.begin + 20 s poll loop,
@@ -309,7 +322,11 @@ void ButtonConnect::stepMqttConnect() {
     _mqtt.setTimeout(2000);
     _mqtt.setWill(_topicStatus.c_str(), "{\"online\":false}", false, 1);
     if (!_mqtt.connect(_cfg.deviceId, _cfg.deviceId, _cfg.deviceToken)) {
-        Serial.printf("[MQTT] CONNECT rejected, rc=%d\n", (int)_mqtt.getReturnCode());
+        // MQTTPubSubClient never copies the CONNACK return code into getReturnCode() (it
+        // stays 0 = "accepted"), so report the lwmqtt error instead: it distinguishes a
+        // broker refusal (CONNACK with a non-zero code) from no answer at all.
+        const int err = (int)_mqtt.getLastError();
+        Serial.printf("[MQTT] CONNECT rejected (%s, err=%d)\n", connectErrorText(err), err);
         // A failed connect() makes MQTTPubSubClient call close(), which disconnects the
         // WebSocket too — so the retry has to start from a fresh transport, not just a
         // new CONNECT. Tearing down here also frees the BearSSL buffer while we back off.
