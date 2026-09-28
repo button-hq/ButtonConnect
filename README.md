@@ -50,19 +50,39 @@ Failures back off exponentially (3 s → 6 s → 12 s → 24 s → 48 s → 60 s
 3 s on the next successful MQTT connect) instead of retrying every 3 s forever — a
 rejected device (bad token, deleted device) no longer hammers the broker.
 
-**One blocking call remains, honestly**: the first time `loop()` needs to (re)connect the
-WebSocket, the `WebSockets` library's `loop()` itself performs the initial TCP+TLS
-`connect()` **synchronously** the moment its own internal retry timer allows — there is no
-non-blocking connect API in that library to poll instead. This is typically **1-3 s**, and
-up to **~5 s** worst case (`WEBSOCKETS_TCP_TIMEOUT` on ESP32; unbounded-but-similar on
-ESP8266's `WiFiClientSecureBearSSL`). Everything else — the debounce logic, the HTTP
-Upgrade handshake once TCP+TLS is up, MQTT CONNACK, and all of `CONNECTED`'s steady-state
-traffic — is either instant or bounded well under that. `begin()` itself never blocks.
+> **Note (all boards): `loop()` freezes during each TLS handshake.** While the SDK is
+> connecting or reconnecting, every connection attempt runs one TCP+TLS handshake inside
+> the `WebSockets` library, and that handshake is **synchronous**: `loop()` does not return
+> until it succeeds or fails. The library has no non-blocking connect API to poll instead.
+> Measured on real boards:
+>
+> | Board | Successful handshake | Failed handshake |
+> |---|---|---|
+> | ESP8266 (BearSSL) | ~5 s | ~5 s |
+> | ESP32 / ESP32-C6 (mbedTLS) | 1-5 s | up to ~15 s (one attempt observed at 15.0 s) |
+>
+> On ESP32 the TLS layer's own handshake timeout is much longer than that (arduino-esp32's
+> default is 120 s) and the `WebSockets` library does not expose it, so a stalled server can
+> in principle hold `loop()` even longer. While connected there is no handshake and
+> `loop()` returns immediately.
+>
+> Plan your sketch for it: anything time-critical (button input, LEDs, relays, watchdogs)
+> must not depend on `loop()` returning quickly while the device is offline. Use interrupts
+> for input, as `examples/ButtonPress` does. Keep the watchdog timeout above the worst
+> handshake above.
+
+Everything else — the debounce logic, the HTTP Upgrade handshake once TCP+TLS is up, MQTT
+CONNACK, and all of `CONNECTED`'s steady-state traffic — is either instant or bounded well
+under that. `begin()` itself never blocks.
+
+**Presses made while offline are not queued.** `emitButtonPress()` returns `false` when
+there is no MQTT connection, and the press is dropped; nothing is replayed after reconnect.
+Show the user something (an LED blink) if the press matters.
 
 **This is why `examples/ButtonPress` latches the button in an interrupt** instead of
 `digitalRead()`-ing it once per `loop()` iteration: an ISR timestamps every edge into a
-ring buffer the instant it happens, so a press landing during that one remaining 1-5 s
-handshake is still recorded and correctly classified once `loop()` gets back around to
+ring buffer the instant it happens, so a press landing during a TLS handshake (see the
+note above) is still recorded and correctly classified once `loop()` gets back around to
 draining the buffer. See `ButtonGesture.h` for the debounce/chording logic, shared
 between the example and `test/host/test_gesture.cpp`.
 
