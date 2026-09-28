@@ -1,8 +1,17 @@
 #include "ButtonConnect.h"
 #include <ArduinoJson.h>
+#include <time.h>
 
 // WebSocket handshake timeout (the WS transport must be up before MQTT CONNECT can ride it).
 #define BUTTON_WS_CONNECT_TIMEOUT_MS 15000
+
+// ESP8266: how long one connect attempt waits for NTP before giving up (and retrying on the
+// next attempt). Earliest wall-clock time accepted as "set": anything before it means the
+// clock is still at its power-on value (the Unix epoch).
+#ifndef BUTTON_NTP_TIMEOUT_MS
+  #define BUTTON_NTP_TIMEOUT_MS 15000
+#endif
+#define BUTTON_MIN_VALID_EPOCH 1704067200UL   // 2024-01-01T00:00:00Z
 
 // Default trust anchors, used when ButtonConnectConfig.rootCaPem is null.
 //
@@ -132,7 +141,42 @@ void ButtonConnect::ensureTransport() {
     _transportBegun = true;
 }
 
+// ESP8266 / BearSSL checks the server certificate's validity dates against the system
+// clock, and the ESP8266 has no RTC: after boot the clock reads the Unix epoch (1970) until
+// something sets it. With the clock at 1970 every handshake fails with "Certificate is
+// expired or not yet valid" — silently, as a WebSocket that never comes up. Whether the
+// clock happened to get set depended on the network (some routers hand out an NTP server
+// via DHCP, most home routers do not), so the same firmware worked on one WiFi and never
+// connected on another. Set it explicitly before the first handshake.
+// (ESP32/mbedTLS in arduino-esp32 does not fail on an unset clock, so this is 8266-only.)
+bool ButtonConnect::ensureClock() {
+#if defined(ESP8266)
+    if (time(nullptr) >= (time_t)BUTTON_MIN_VALID_EPOCH) return true;
+    if (!_ntpStarted) {
+        const char* primary = (_cfg.ntpServer && *_cfg.ntpServer) ? _cfg.ntpServer : "pool.ntp.org";
+        configTime(0, 0, primary, "time.google.com", "time.cloudflare.com");
+        _ntpStarted = true;
+        Serial.printf("[Time] clock not set; syncing via NTP (%s) ...\n", primary);
+    }
+    unsigned long t0 = millis();
+    while (time(nullptr) < (time_t)BUTTON_MIN_VALID_EPOCH && millis() - t0 < BUTTON_NTP_TIMEOUT_MS) {
+        delay(100);
+        yield();
+    }
+    if (time(nullptr) < (time_t)BUTTON_MIN_VALID_EPOCH) {
+        Serial.println("[Time] NTP sync failed — TLS certificate check cannot pass; will retry "
+                       "(is outbound UDP/123 blocked? set cfg.ntpServer to a reachable server)");
+        return false;
+    }
+    Serial.printf("[Time] clock set, epoch=%lu\n", (unsigned long)time(nullptr));
+#endif
+    return true;
+}
+
 bool ButtonConnect::connectMqtt() {
+    // Without a valid clock the 8266 TLS handshake cannot succeed; don't burn a 15 s
+    // WebSocket attempt on it.
+    if (!ensureClock()) return false;
     ensureTransport();
     Serial.printf("[MQTT] WSS connect to wss://%s:%u%s ...\n",
                   _cfg.mqttHost, _cfg.mqttPort, _cfg.mqttPath);

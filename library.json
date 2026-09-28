@@ -1,6 +1,6 @@
 {
   "name": "ButtonConnect",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Button (buttonhq.io) BYOD device SDK — WiFi + MQTT-over-WSS connection to the Button cloud on the constrained byod/ plane. Extracted from the first-party firmware as the open-source baseline.",
   "keywords": "mqtt, wss, websocket, iot, esp32, esp8266, button, byod",
   "license": "Apache-2.0",
