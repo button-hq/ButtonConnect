@@ -1,15 +1,18 @@
 # ButtonConnect
 
 The **BYOD device SDK** for the [Button](https://buttonhq.io) cloud. Connect your own
-ESP32 / ESP8266 hardware to Button over **MQTT-over-WSS** (secure WebSockets through the
-Cloudflare edge) on the constrained `byod/{deviceId}/*` plane — publish button gestures
-and telemetry, receive commands, and get press acknowledgements back.
+ESP32 / ESP8266 hardware to Button over **MQTT on a TLS WebSocket** on the
+`byod/{deviceId}/*` topics — publish button gestures and telemetry, receive commands,
+and get press acknowledgements back.
 
-- **WiFi + MQTT over secure WebSockets** with mandatory TLS server validation — the
-  broker is never exposed directly.
+- **WiFi + MQTT over a TLS WebSocket**, with the server certificate always validated
+  against two bundled public root CAs.
 - **Gestures**: single / double / triple click and click+long chords map straight
   to the triggers you configure in the dashboard.
 - **Commands**: built-in `reboot`; actuators handle their own methods via `onCommand`.
+- **Cloud-only**: the device needs WiFi and internet access to reach Button; there is no
+  local mode. `loop()` advances the connection one step per call, but freezes during each
+  TLS handshake — see the note below.
 
 > This is the open-source connection layer extracted from Button's first-party firmware.
 
@@ -160,7 +163,7 @@ See `examples/ButtonPress` for a full button with chord detection.
 optional `mqttHost` / `mqttPort` / `mqttPath` (default: the Button cloud WSS endpoint
 `mq-server-01.buttonhq.io:443/`) and `rootCaPem`, and `ntpServer` (ESP8266 only; see below).
 
-**Certificates: nothing to configure.** The Button cloud sits behind a Cloudflare tunnel
+**Certificates: nothing to configure.** The Button cloud sits behind Cloudflare,
 served with a public certificate, and the SDK bundles the two public roots behind it —
 *ISRG Root X1* (Let's Encrypt) and *GTS Root R4* (Google Trust Services). Both are shipped
 because Cloudflare re-issues that certificate unannounced and has moved between the two
@@ -207,9 +210,9 @@ you will see `[Time] NTP sync failed` instead of a silent timeout — point
 
 ## Topics
 
-The SDK uses the constrained `byod/{deviceId}/*` plane: `status`, `event`, `telemetry`,
-`battery`, `cmd/ack` (publish) and `command` (subscribe). The device is confined to its
-own topics by the server ACL.
+The SDK uses the `byod/{deviceId}/*` topics: `status`, `event`, `telemetry`,
+`battery`, `cmd/ack` (publish) and `command` (subscribe). A device publishes and
+subscribes only under its own `byod/{deviceId}/` prefix.
 
 ## Running the host tests
 
