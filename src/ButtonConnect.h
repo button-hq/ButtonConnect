@@ -147,6 +147,7 @@ private:
     State _backoffTarget = State::WIFI_START;
     unsigned long _backoffUntilMs   = 0;
     unsigned long _wifiStartMs      = 0;
+    bool          _wifiAttempted    = false;   // a WiFi.begin() has been issued before
     unsigned long _clockWaitStartMs = 0;
     unsigned long _wsStartMs        = 0;
 };
