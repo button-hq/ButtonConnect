@@ -122,6 +122,10 @@ private:
     void stepBackoff(unsigned long now);
     void enterBackoff(State target, const char* logTag);
 
+    void registerWifiEvents();   // once: record every station-disconnect reason
+    void logWifiDisconnects();   // print reasons recorded since the last call (from loop())
+    void resetWifiForRetry();    // cancel an in-flight join so the next WiFi.begin() is accepted
+
     void ensureTransport();
     bool ensureClock();   // one non-blocking check/kick of the ESP8266 NTP sync
     void teardownTransport();
@@ -148,6 +152,14 @@ private:
     unsigned long _backoffUntilMs   = 0;
     unsigned long _wifiStartMs      = 0;
     bool          _wifiAttempted    = false;   // a WiFi.begin() has been issued before
+    bool          _wifiEventsRegistered = false;
+    // Written from the WiFi event callback (another task on ESP32), read from loop().
+    volatile uint32_t _wifiDiscCount  = 0;
+    volatile uint16_t _wifiDiscReason = 0;
+    uint32_t          _wifiDiscLogged = 0;
+#if defined(ESP8266)
+    WiFiEventHandler  _wifiDiscHandler;           // must stay alive or the callback is dropped
+#endif
     unsigned long _clockWaitStartMs = 0;
     unsigned long _wsStartMs        = 0;
 };
