@@ -15,7 +15,7 @@
 
 // Default trust anchors, used when ButtonConnectConfig.rootCaPem is null.
 //
-// The Button cloud is reached over wss:// through a Cloudflare tunnel, and Cloudflare
+// The Button cloud is reached over wss:// behind Cloudflare, and Cloudflare
 // serves that endpoint with a PUBLIC certificate — so the anchor has to be the public
 // root behind it, not our own private CA.
 //
@@ -224,7 +224,7 @@ void ButtonConnect::stepWifiWait(unsigned long now) {
     // else: nothing to do this call — WiFi.begin() is already in flight.
 }
 
-// Initialize the secure-WebSocket transport + MQTT-over-WS layer (idempotent per session).
+// Initialize the TLS WebSocket transport + MQTT-over-WS layer (idempotent per session).
 void ButtonConnect::ensureTransport() {
     if (_transportBegun) return;
 
@@ -240,7 +240,7 @@ void ButtonConnect::ensureTransport() {
     _ws.enableHeartbeat(30000, 6000, 2);
 
     // Plain WSS with MANDATORY server validation (no client cert / mTLS — not meaningful
-    // on a chip that can't protect a private key). Auth is deviceId+token + server ACL.
+    // on a chip that can't protect a private key). Auth is deviceId + token.
     const char* ca = _cfg.rootCaPem ? _cfg.rootCaPem : BUTTON_ROOT_CA;
 #if defined(ESP32)
     _ws.beginSslWithCA(_cfg.mqttHost, _cfg.mqttPort, _cfg.mqttPath, ca, "mqtt");
