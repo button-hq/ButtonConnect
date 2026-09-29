@@ -89,6 +89,7 @@ void ButtonConnect::begin(const ButtonConnectConfig& cfg) {
     _topicCmdAck    = _base + "cmd/ack";
 
     WiFi.mode(WIFI_STA);
+    registerWifiEvents();
     // The WSS transport (WebSocketsClient + MQTTPubSubClient) is initialized lazily in
     // ensureTransport() on the first connect so a failed handshake can tear it down and
     // free the TLS buffer before the next retry.
@@ -140,6 +141,56 @@ static const char* connectErrorText(int err) {
 // A WiFi drop detected in ANY state above WIFI_WAIT (except while already backing off
 // to retry WiFi itself) forces an immediate restart at WIFI_START — there is no point
 // waiting out an MQTT retry timer against a dead link.
+// Station-disconnect reasons are the only record of WHY a join failed (wrong password,
+// handshake timeout, AP not found, beacon loss, ...). The core logs them only at a verbose
+// log level, so the SDK records them itself and prints them from loop().
+void ButtonConnect::registerWifiEvents() {
+    if (_wifiEventsRegistered) return;
+    _wifiEventsRegistered = true;
+#if defined(ESP32)
+    WiFi.onEvent([this](WiFiEvent_t, WiFiEventInfo_t info) {
+        _wifiDiscReason = info.wifi_sta_disconnected.reason;
+        _wifiDiscCount  = _wifiDiscCount + 1;
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+#elif defined(ESP8266)
+    _wifiDiscHandler = WiFi.onStationModeDisconnected([this](const WiFiEventStationModeDisconnected& e) {
+        _wifiDiscReason = (uint16_t)e.reason;
+        _wifiDiscCount  = _wifiDiscCount + 1;
+    });
+#endif
+}
+
+void ButtonConnect::logWifiDisconnects() {
+    uint32_t count = _wifiDiscCount;
+    if (count == _wifiDiscLogged) return;
+    uint16_t reason = _wifiDiscReason;
+    uint32_t missed = count - _wifiDiscLogged - 1;   // coalesced events since the last print
+    _wifiDiscLogged = count;
+#if defined(ESP32)
+    Serial.printf("[WiFi] disconnected, reason=%u (%s)", reason,
+                  WiFi.disconnectReasonName((wifi_err_reason_t)reason));
+#else
+    Serial.printf("[WiFi] disconnected, reason=%u", reason);
+#endif
+    if (missed) Serial.printf(" +%lu more", (unsigned long)missed);
+    Serial.println();
+}
+
+// Cancel an in-flight join before the next attempt. On ESP32 the driver keeps trying to
+// join after our 20 s timeout, and while it is "connecting" a new WiFi.begin() is refused
+// ("sta is connecting, return error" / ESP_ERR_WIFI_CONN). WiFi.disconnect() does NOT clear
+// that: in arduino-esp32 3.x it returns early when the station is not yet connected, so it
+// never reaches the driver. Restarting the station (mode OFF -> STA, ~20 ms measured) does.
+// ESP8266 has no such state; disconnect() there reaches the driver.
+void ButtonConnect::resetWifiForRetry() {
+#if defined(ESP32)
+    WiFi.mode(WIFI_OFF);
+    WiFi.mode(WIFI_STA);
+#else
+    WiFi.disconnect();
+#endif
+}
+
 void ButtonConnect::stepWifiStart() {
     if (WiFi.status() == WL_CONNECTED) {
         _clockWaitStartMs = millis();
@@ -147,12 +198,11 @@ void ButtonConnect::stepWifiStart() {
         return;
     }
     Serial.printf("[WiFi] connecting to %s ...\n", _cfg.wifiSsid);
-    // Cancel the previous attempt before starting a new one. On ESP32 the driver keeps
-    // trying to join after our 20 s timeout, and while it is still "connecting" a new
-    // WiFi.begin() is refused ("sta is connecting, return error" / ESP_ERR_WIFI_CONN), so
-    // without this every retry was a no-op and the device never recovered. Not done on the
-    // very first attempt (nothing to cancel). ESP32 waits at most ~100 ms here.
-    if (_wifiAttempted) WiFi.disconnect();
+    // Not on the very first attempt: there is nothing to cancel yet.
+    if (_wifiAttempted) {
+        resetWifiForRetry();
+        _wifiDiscLogged = _wifiDiscCount;   // the reset's own disconnect event is not a failure
+    }
     _wifiAttempted = true;
     WiFi.begin(_cfg.wifiSsid, _cfg.wifiPassword);   // called ONCE per attempt, not per loop()
     _wifiStartMs = millis();
@@ -161,7 +211,8 @@ void ButtonConnect::stepWifiStart() {
 
 void ButtonConnect::stepWifiWait(unsigned long now) {
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("[WiFi] connected, ip=%s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("[WiFi] connected, ip=%s rssi=%d dBm ch=%d\n", WiFi.localIP().toString().c_str(),
+                      (int)WiFi.RSSI(), (int)WiFi.channel());
         _clockWaitStartMs = now;
         _state = needsClockWait() ? State::CLOCK_WAIT : State::WS_START;
         return;
@@ -412,6 +463,7 @@ unsigned long ButtonConnect::nextRetryInMs() const {
 
 void ButtonConnect::loop() {
     unsigned long now = millis();
+    logWifiDisconnects();
     switch (_state) {
         case State::WIFI_START:   stepWifiStart();    break;
         case State::WIFI_WAIT:    stepWifiWait(now);  break;
