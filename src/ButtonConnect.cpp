@@ -147,6 +147,13 @@ void ButtonConnect::stepWifiStart() {
         return;
     }
     Serial.printf("[WiFi] connecting to %s ...\n", _cfg.wifiSsid);
+    // Cancel the previous attempt before starting a new one. On ESP32 the driver keeps
+    // trying to join after our 20 s timeout, and while it is still "connecting" a new
+    // WiFi.begin() is refused ("sta is connecting, return error" / ESP_ERR_WIFI_CONN), so
+    // without this every retry was a no-op and the device never recovered. Not done on the
+    // very first attempt (nothing to cancel). ESP32 waits at most ~100 ms here.
+    if (_wifiAttempted) WiFi.disconnect();
+    _wifiAttempted = true;
     WiFi.begin(_cfg.wifiSsid, _cfg.wifiPassword);   // called ONCE per attempt, not per loop()
     _wifiStartMs = millis();
     _state = State::WIFI_WAIT;
