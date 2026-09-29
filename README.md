@@ -18,24 +18,19 @@ and get press acknowledgements back.
 
 ## Install
 
-> Not yet in the PlatformIO / Arduino registries — install straight from GitHub.
-
-**PlatformIO** (`platformio.ini`):
+**PlatformIO** (`platformio.ini`) — the registry package pulls in its dependencies:
 ```ini
 lib_deps =
-    https://github.com/button-hq/ButtonConnect.git
-    links2004/WebSockets @ ^2.4.1
-    hideakitai/MQTTPubSubClient @ ^0.3.2
-    bblanchon/ArduinoJson @ ^6.21.0
+    button-hq/ButtonConnect @ ^0.4.3
 platform = espressif32   ; or espressif8266
 board = esp32dev         ; XIAO C6 button → seeed_xiao_esp32c6
 framework = arduino
 ```
 
-**Arduino IDE**: download the repo as a ZIP
-(`https://github.com/button-hq/ButtonConnect` → Code → Download ZIP), then Sketch →
-Include Library → Add .ZIP Library… Dependencies: install **WebSockets** (by Markus
-Sattler), **MQTTPubSubClient**, and **ArduinoJson** from the Library Manager.
+**Arduino IDE**: until ButtonConnect appears in the Library Manager, download the repo
+as a ZIP (`https://github.com/button-hq/ButtonConnect` → Code → Download ZIP), then
+Sketch → Include Library → Add .ZIP Library… Dependencies: install **WebSockets** (by
+Markus Sattler), **MQTTPubSubClient**, and **ArduinoJson** 6.x from the Library Manager.
 
 ## How loop() behaves
 

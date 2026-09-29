@@ -1,14 +1,25 @@
 {
   "name": "ButtonConnect",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Connect your own ESP32/ESP8266 to the Button cloud (buttonhq.io) — WiFi + MQTT over a TLS WebSocket, with button gestures, telemetry, commands and press acknowledgements.",
   "keywords": "mqtt, wss, websocket, iot, esp32, esp8266, button, byod",
   "license": "Apache-2.0",
   "frameworks": "arduino",
-  "platforms": ["espressif32", "espressif8266"],
+  "platforms": [
+    "espressif32",
+    "espressif8266"
+  ],
   "dependencies": {
     "links2004/WebSockets": "^2.4.1",
     "hideakitai/MQTTPubSubClient": "^0.3.2",
     "bblanchon/ArduinoJson": "^6.21.0"
+  },
+  "export": {
+    "exclude": [
+      ".github",
+      ".github/*",
+      "test",
+      "test/*"
+    ]
   }
 }
