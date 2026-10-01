@@ -1,0 +1,81 @@
+name: Release
+
+# Manual release: Actions → Release → Run workflow (on master).
+# Publishes the version in library.properties to the PlatformIO registry under the
+# button-hq organisation, then tags v<version> and creates a GitHub release.
+# Arduino Library Manager picks up the new tag on its own once the library is listed.
+# PlatformIO versions can never be reused, so every check runs before anything is published,
+# and the tag is created only after the publish succeeds.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Pre-flight
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Must run on master
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "::error::Release runs only on master (got $GITHUB_REF)"; exit 1
+          fi
+      - uses: actions/checkout@v4
+      - id: v
+        name: Read and check version
+        run: |
+          V=$(sed -n 's/^version=//p' library.properties)
+          J=$(python3 -c 'import json;print(json.load(open("library.json"))["version"])')
+          echo "version=$V (library.json: $J)"
+          [ -n "$V" ] && [ "$V" = "$J" ] || { echo "::error::library.properties and library.json versions differ"; exit 1; }
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::version '$V' is not x.y.z"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/v$V" >/dev/null; then
+            echo "::error::tag v$V already exists"; exit 1
+          fi
+          CODE=$(curl -s -o reg.json -w '%{http_code}' "https://api.registry.platformio.org/v3/packages/button-hq/library/ButtonConnect")
+          if [ "$CODE" = "200" ]; then
+            if python3 -c 'import json,sys;d=json.load(open("reg.json"));sys.exit(0 if any(x.get("name")==sys.argv[1] for x in d.get("versions",[])) else 1)' "$V"; then
+              echo "::error::ButtonConnect $V is already on the PlatformIO registry"; exit 1
+            fi
+          elif [ "$CODE" != "404" ]; then
+            echo "::error::PlatformIO registry lookup returned HTTP $CODE"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Checks
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish ${{ needs.guard.outputs.version }}
+    needs: [guard, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Package contents
+        run: pio pkg pack -o "$RUNNER_TEMP" && tar -tzf "$RUNNER_TEMP"/*.tar.gz
+      - name: Publish to the PlatformIO registry
+        env:
+          PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
+        run: pio pkg publish . --owner button-hq --type library --no-interactive
+      - name: Tag and create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.guard.outputs.version }}
+        run: gh release create "v$V" --target "$GITHUB_SHA" --title "ButtonConnect $V" --generate-notes

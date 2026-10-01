@@ -12,15 +12,14 @@
 #include "internal/backoff.h"
 
 // ── Button Connect SDK ───────────────────────────────────────────────────────
-// Connects an ESP device to the Button cloud (buttonhq.io) over MQTT-over-WSS on
-// the constrained `byod/{deviceId}/*` plane. This is the connection/transport layer
+// Connects an ESP device to the Button cloud (buttonhq.io) over MQTT on a TLS
+// WebSocket, on the `byod/{deviceId}/*` topics. This is the connection/transport layer
 // extracted from the first-party firmware as the open-source baseline — no FOTA,
 // no deep sleep, no provisioning: credentials are supplied by the caller.
 //
-// Transport: secure WebSockets (wss://host:443/) → Cloudflare tunnel → mosquitto's
-// plaintext websockets listener. The broker is never exposed directly. TLS server
-// validation is MANDATORY (see rootCaPem below); auth is deviceId+token + the
-// server-side ACL, which decides what a given device may actually do (strategy §5.3).
+// Transport: MQTT over a TLS WebSocket (wss://host:443/). TLS server validation is
+// MANDATORY (see rootCaPem below); the device authenticates with its deviceId and
+// token from the dashboard.
 //
 // A *source* (button/sensor) publishes events/telemetry. An *actuator* (relay/IR)
 // additionally sets an onCommand() handler to receive commands.
@@ -122,6 +121,10 @@ private:
     void stepBackoff(unsigned long now);
     void enterBackoff(State target, const char* logTag);
 
+    void registerWifiEvents();   // once: record every station-disconnect reason
+    void logWifiDisconnects();   // print reasons recorded since the last call (from loop())
+    void resetWifiForRetry();    // cancel an in-flight join so the next WiFi.begin() is accepted
+
     void ensureTransport();
     bool ensureClock();   // one non-blocking check/kick of the ESP8266 NTP sync
     void teardownTransport();
@@ -147,6 +150,15 @@ private:
     State _backoffTarget = State::WIFI_START;
     unsigned long _backoffUntilMs   = 0;
     unsigned long _wifiStartMs      = 0;
+    bool          _wifiAttempted    = false;   // a WiFi.begin() has been issued before
+    bool          _wifiEventsRegistered = false;
+    // Written from the WiFi event callback (another task on ESP32), read from loop().
+    volatile uint32_t _wifiDiscCount  = 0;
+    volatile uint16_t _wifiDiscReason = 0;
+    uint32_t          _wifiDiscLogged = 0;
+#if defined(ESP8266)
+    WiFiEventHandler  _wifiDiscHandler;           // must stay alive or the callback is dropped
+#endif
     unsigned long _clockWaitStartMs = 0;
     unsigned long _wsStartMs        = 0;
 };

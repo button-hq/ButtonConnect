@@ -1,0 +1,91 @@
+name: CI
+
+# Checks for every pull request. The release workflow calls this same file, so a
+# release is published only after the identical checks pass on the release commit.
+on:
+  pull_request:
+    branches: [test, master]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backoff
+        run: g++ -std=c++17 -Wall -Wextra -Werror -o test_backoff test/host/test_backoff.cpp && ./test_backoff
+      - name: Gesture
+        run: g++ -std=c++17 -Wall -Wextra -Werror -o test_gesture test/host/test_gesture.cpp && ./test_gesture
+
+  lint:
+    name: Library lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/arduino-lint-action@v2
+        with:
+          project-type: library
+          compliance: specification
+          # "submit" until the library is listed in Arduino Library Manager; switch to
+          # "update" afterwards (the submit check fails once the name is taken by us).
+          library-manager: submit
+      - name: Manifest versions match
+        run: |
+          P=$(sed -n 's/^version=//p' library.properties)
+          J=$(python3 -c 'import json;print(json.load(open("library.json"))["version"])')
+          echo "library.properties=$P library.json=$J"
+          test -n "$P" && test "$P" = "$J"
+
+  build:
+    name: Build example (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: nodemcuv2
+            platform: espressif8266
+            board: nodemcuv2
+            flags: -DBUTTON_PIN=5 -DPIO_FRAMEWORK_ARDUINO_MMU_CACHE16_IRAM48_SECHEAP_SHARED
+          - env: esp32dev
+            platform: espressif32
+            board: esp32dev
+            flags: ""
+          - env: esp32-c6-devkitc-1
+            platform: https://github.com/pioarduino/platform-espressif32/releases/download/stable/platform-espressif32.zip
+            board: esp32-c6-devkitc-1
+            flags: -DBUTTON_PIN=2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ matrix.env }}-${{ hashFiles('library.json', '.github/workflows/ci.yml') }}
+          restore-keys: pio-${{ matrix.env }}-
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Build examples/ButtonPress against this checkout
+        run: |
+          W=$RUNNER_TEMP/build
+          mkdir -p "$W/src"
+          cp examples/ButtonPress/ButtonPress.ino "$W/src/main.cpp"
+          cat > "$W/platformio.ini" <<EOF
+          [env:${{ matrix.env }}]
+          platform = ${{ matrix.platform }}
+          board = ${{ matrix.board }}
+          framework = arduino
+          lib_deps =
+              symlink://$GITHUB_WORKSPACE
+              links2004/WebSockets@^2.4.1
+              hideakitai/MQTTPubSubClient@^0.3.2
+              bblanchon/ArduinoJson@^6.21.0
+          build_flags = -Wall ${{ matrix.flags }}
+          EOF
+          pio run -d "$W" -e ${{ matrix.env }}
